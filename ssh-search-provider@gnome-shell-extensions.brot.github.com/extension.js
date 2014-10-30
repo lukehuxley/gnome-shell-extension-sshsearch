@@ -31,7 +31,6 @@ const DEFAULT_TERMINAL_SCHEMA = 'org.gnome.desktop.default-applications.terminal
 const DEFAULT_TERMINAL_KEY = 'exec';
 const DEFAULT_TERMINAL_ARGS_KEY = 'exec-arg';
 const SSHSEARCH_TERMINAL_APP = 'gnome-terminal';
-const HOST_SEARCHSTRING = 'host ';
 
 // sshSearchProvider holds the instance of the search provider
 // implementation. If null, the extension is either uninitialized
@@ -48,9 +47,19 @@ function getDefaultTerminal() {
         }
 
         let terminal_setting = new Gio.Settings({ schema: DEFAULT_TERMINAL_SCHEMA });
-        return {'exec': terminal_setting.get_string(DEFAULT_TERMINAL_KEY),
-                'args': terminal_setting.get_string(DEFAULT_TERMINAL_ARGS_KEY)
+
+        if (terminal_setting.get_string(DEFAULT_TERMINAL_KEY) != 'x-terminal-emulator') {
+
+            return {'exec': terminal_setting.get_string(DEFAULT_TERMINAL_KEY),
+                    'args': terminal_setting.get_string(DEFAULT_TERMINAL_ARGS_KEY)
+                   };
+
+        } else {
+
+            return {'exec': SSHSEARCH_TERMINAL_APP,
+                'args': ''
                };
+        }
     } catch (err) {
         return {'exec': SSHSEARCH_TERMINAL_APP,
                 'args': ''
@@ -58,10 +67,130 @@ function getDefaultTerminal() {
     }
 }
 
+
+var arrayUnique = function(a) {
+    return a.reduce(function(p, c) {
+        if (p.indexOf(c) < 0) p.push(c);
+        return p;
+    }, []);
+};
+
 //SshSearchProvider.prototype = {
 const SshSearchProvider = new Lang.Class({
     Name: 'SshSearchProvider',
     Extends: Search.SearchProvider,
+
+    activateResult: function(id) {
+
+        hostArray = id.host.split('.');
+        profile = hostArray[hostArray.length - 1];
+
+        this._exec_ssh(id.user, id.host, id.port, profile);
+
+        // start terminal with ssh command
+        //Util.spawn(cmd);
+    },
+
+    _exec_ssh: function(user, host, port, profile) {
+
+        let terminal_definition = getDefaultTerminal();
+        let terminal_args = terminal_definition.args.split(' ');
+        let cmd = [terminal_definition.exec];
+
+        // add defined gsettings arguments, but remove --execute and -x
+        for (var i=0; i<terminal_args.length; i++) {
+            let arg = terminal_args[i];
+
+            if (arg != '--execute' && arg != '-x' && arg != '--command' && arg != '-e') {
+                cmd.push(terminal_args[i]);
+            }
+        }
+
+        cmd.push('--profile=' + profile);
+
+        // build command
+        cmd.push('--command');
+
+        if (user.length != 0) {
+            target = user + '@' + host;
+        } else {
+            target = host;
+        }
+
+        cmd.push('ssh -t -p ' + port + ' ' + target);
+
+        // start terminal with ssh command
+        Util.spawn(cmd);
+
+    },
+
+    _add_ssh: function(user, host, port, profile) {
+
+        cmd = Array('/usr/local/bin/ssh-config');
+        cmd.push('add');
+        cmd.push(user + '@' + host + ':' + port);
+
+        // start terminal with ssh command
+        Util.spawn(cmd);
+
+    },
+
+    _parse_ssh_string: function(ssh_string) {
+
+        var atSplit = ssh_string.split('@');
+        // If a user has been provided
+        if (atSplit.length > 1) {
+            var user = atSplit[0];
+            var host = atSplit[1];
+        // If a user has not been provided
+        } else {
+            var user = 'root';
+            var host = ssh_string;
+        }
+
+        var colonSplit = host.split(':');
+        // If host has a colon in it
+        if (colonSplit.length > 1) {
+            var port = colonSplit[1];
+            host = colonSplit[0];
+        // If host has no colon in it
+        } else {
+            var port = 22;
+        }
+
+        var dotSplit = host.split('.');
+        // If host has a full stop in it
+        if (dotSplit.length > 1) {
+            var profile = dotSplit[dotSplit.length - 1];
+        // If host has no full stop
+        } else {
+            var profile = 'Default';
+        }
+
+        return {
+            'user': user,
+            'host': host,
+            'port': port,
+            'profile': profile
+        };
+
+    },
+
+    _ssh_array_to_str: function(ssh_array) {
+
+        return ssh_array.user + '@' + ssh_array.host + ':' + ssh_array.port;
+
+    },
+
+    launchSearch: function(terms) {
+        for (i=0; i < terms.length; i++) {
+
+            ssh_result = this._parse_ssh_string(terms[i]);
+
+            this._add_ssh(ssh_result.user, ssh_result.host, ssh_result.port, ssh_result.profile);
+            this._exec_ssh(ssh_result.user, ssh_result.host, ssh_result.port, ssh_result.profile);
+        }
+    },
 
     _init: function() {
         // Since gnome-shell 3.6 the log output is in ~/.cache/gdm/session.log
@@ -70,14 +199,24 @@ const SshSearchProvider = new Lang.Class({
         //log('init ssh-search');
 
         let filename = '';
-        let terminal_definition = {};
+        let terminal_definition = getDefaultTerminal();
 
         this.title = "SSHSearch";
+        this.id = "SSHSearch";
         this.searchSystem = null;
         this._configHosts = [];
-        this._knownHosts = [];
-        this._sshknownHosts1 = [];
-        this._sshknownHosts2 = [];
+
+        this.appInfo = {
+            get_name: function() {
+                return 'terminator';
+            },
+            get_icon: function() {
+                return Gio.icon_new_for_string('/usr/share/icons/hicolor/scalable/apps/terminator.svg');
+            },
+            get_id: function() {
+                return this.id;
+            }
+        };
 
         // init for ~/.ssh/config
         filename = GLib.build_filenamev([GLib.get_home_dir(), '/.ssh/', 'config']);
@@ -86,24 +225,6 @@ const SshSearchProvider = new Lang.Class({
         this.configMonitor.connect('changed', Lang.bind(this, this._onConfigChanged));
         this._onConfigChanged(null, configFile, null, Gio.FileMonitorEvent.CREATED);
 
-        // init for ~/.ssh/known_hosts
-        filename = GLib.build_filenamev([GLib.get_home_dir(), '/.ssh/', 'known_hosts']);
-        let knownhostsFile = Gio.file_new_for_path(filename);
-        this.knownhostsMonitor = knownhostsFile.monitor_file(Gio.FileMonitorFlags.NONE, null);
-        this.knownhostsMonitor.connect('changed', Lang.bind(this, this._onKnownhostsChanged));
-        this._onKnownhostsChanged(null, knownhostsFile, null, Gio.FileMonitorEvent.CREATED);
-
-        // init for /etc/ssh/ssh_known_hosts
-        let sshknownhostsFile1 = Gio.file_new_for_path('/etc/ssh/ssh_known_hosts');
-        this.sshknownhostsMonitor1 = sshknownhostsFile1.monitor_file(Gio.FileMonitorFlags.NONE, null);
-        this.sshknownhostsMonitor1.connect('changed', Lang.bind(this, this._onSshKnownhosts1Changed));
-        this._onSshKnownhosts1Changed(null, sshknownhostsFile1, null, Gio.FileMonitorEvent.CREATED);
-
-        // init for /etc/ssh_known_hosts
-        let sshknownhostsFile2 = Gio.file_new_for_path('/etc/ssh_known_hosts');
-        this.sshknownhostsMonitor2 = sshknownhostsFile2.monitor_file(Gio.FileMonitorFlags.NONE, null);
-        this.sshknownhostsMonitor2.connect('changed', Lang.bind(this, this._onSshKnownhosts2Changed));
-        this._onSshKnownhosts2Changed(null, sshknownhostsFile2, null, Gio.FileMonitorEvent.CREATED);
     },
 
     _onConfigChanged: function(filemonitor, file, other_file, event_type) {
@@ -116,88 +237,52 @@ const SshSearchProvider = new Lang.Class({
             event_type == Gio.FileMonitorEvent.CHANGED ||
             event_type == Gio.FileMonitorEvent.CHANGES_DONE_HINT)
         {
-            this._configHosts = [];
 
-            // read hostnames if ssh-config file is created or changed
             let content = file.load_contents(null);
             let filelines = String(content[1]).trim().split('\n');
 
-            // search for all lines which begins with "host"
+            let host = '';
+            let hosts = [];
+
             for (var i=0; i<filelines.length; i++) {
+
                 let line = filelines[i].toLowerCase();
-                if (line.lastIndexOf(HOST_SEARCHSTRING, 0) == 0) {
-                    // read all hostnames in the host definition line
-                    let hostnames = line.slice(HOST_SEARCHSTRING.length).split(' ');
-                    for (var j=0; j<hostnames.length; j++) {
-                        this._configHosts.push(hostnames[j]);
+
+                // If line begins with "host "
+                if (line.lastIndexOf('host ', 0) == 0) {
+
+                    let hostname = line.slice('host '.length);
+
+                    // If this is the first host to be added
+                    if (host.length > 0) {
+                        hosts.push(host);
                     }
+
+                    host = hostname;
+
+                // If line contains "user "
+                } else if (line.match('user ')) {
+
+                    index = line.indexOf('user ');
+                    host = line.slice('user '.length + index) + '@' + host;
+
+                // If line contains "port "
+                } else if (line.match('port ')) {
+
+                    index = line.indexOf('port ');
+                    host = host + ':' + line.slice('port '.length + index);
+
                 }
             }
-        }
-    },
 
-    _onKnownhostsChanged: function(filemonitor, file, other_file, event_type) {
-        if (!file.query_exists (null)) {
-            this._knownHosts = [];
-            return;
-        }
-
-        if (event_type == Gio.FileMonitorEvent.CREATED ||
-            event_type == Gio.FileMonitorEvent.CHANGED ||
-            event_type == Gio.FileMonitorEvent.CHANGES_DONE_HINT)
-        {
-            this._knownHosts = this._parseKnownHosts(file);
-        }
-    },
-
-    _onSshKnownhosts1Changed: function(filemonitor, file, other_file, event_type) {
-        if (!file.query_exists (null)) {
-            this._sshknownHosts1 = [];
-            return;
-        }
-
-        if (event_type == Gio.FileMonitorEvent.CREATED ||
-            event_type == Gio.FileMonitorEvent.CHANGED ||
-            event_type == Gio.FileMonitorEvent.CHANGES_DONE_HINT)
-        {
-            this._sshknownHosts1 = this._parseKnownHosts(file);
-        }
-    },
-
-    _onSshKnownhosts2Changed: function(filemonitor, file, other_file, event_type) {
-        if (!file.query_exists (null)) {
-            this._sshknownHosts2 = [];
-            return;
-        }
-
-        if (event_type == Gio.FileMonitorEvent.CREATED ||
-            event_type == Gio.FileMonitorEvent.CHANGED ||
-            event_type == Gio.FileMonitorEvent.CHANGES_DONE_HINT)
-        {
-            this._sshknownHosts2 = this._parseKnownHosts(file);
-        }
-    },
-
-    _parseKnownHosts: function(file) {
-        let knownHosts = [];
-
-        // read hostnames if ssh-known_hosts file is created or changed
-        let content = file.load_contents(null);
-        let filelines = String(content[1]).trim().split('\n');
-
-        for (var i=0; i<filelines.length; i++) {
-            let hostnames = filelines[i].split(' ')[0];
-
-            // if hostname had a 60 char length, it looks like
-            // the hostname is hashed and we ignore it here
-            if (hostnames.length != 60) {
-                hostnames = hostnames.split(',');
-                for (var j=0; j<hostnames.length; j++) {
-                    knownHosts.push(hostnames[j]);
-                }
+            // Very last host in the file
+            if (host.length > 0) {
+                hosts.push(host);
             }
+
+            this._configHosts = arrayUnique(hosts);
+
         }
-        return knownHosts;
     },
 
     createResultObject: function(result, terms) {
@@ -212,9 +297,11 @@ const SshSearchProvider = new Lang.Class({
     getResultMeta: function(resultId) {
         let ssh_name = resultId.host;
         let terminal_definition = getDefaultTerminal();
+
         if (resultId.port != 22) {
             ssh_name = ssh_name + ':' + resultId.port;
         }
+
         if (resultId.user.length != 0) {
             ssh_name = resultId.user + '@' + ssh_name;
         }
@@ -229,68 +316,15 @@ const SshSearchProvider = new Lang.Class({
                };
     },
 
-    activateResult: function(id) {
-        let target = id.host;
-        let terminal_definition = getDefaultTerminal();
-        let terminal_args = terminal_definition.args.split(' ');
-        let cmd = [terminal_definition.exec]
-
-        // add defined gsettings arguments, but remove --execute and -x
-        for (var i=0; i<terminal_args.length; i++) {
-            let arg = terminal_args[i];
-
-            if (arg != '--execute' && arg != '-x' && arg != '--command' && arg != '-e') {
-                cmd.push(terminal_args[i]);
-            }
-        }
-
-        // build command
-        cmd.push('--command')
-
-        if (id.user.length != 0) {
-            target = id.user + '@' + target;
-        }
-        if (id.port == 22) {
-            // don't call with the port option, because the host definition
-            // could be from the ~/.ssh/config file
-            cmd.push('ssh ' + target);
-        }
-        else {
-            cmd.push('ssh -p ' + id.port + ' ' + target);
-        }
-
-        // start terminal with ssh command
-        Util.spawn(cmd);
-    },
-
     _checkHostnames: function(hostnames, terms) {
         let searchResults = [];
         for (var i=0; i<hostnames.length; i++) {
             for (var j=0; j<terms.length; j++) {
                 try {
-                    let term_parts = terms[j].split('@');
-                    let host = term_parts[term_parts.length-1];
-                    let user = '';
-                    if (term_parts.length > 1) {
-                        user = term_parts[0];
-                    }
-                    if (hostnames[i].match(host)) {
-                        host = hostnames[i];
-                        let port = 22;
 
-                        // check if hostname is in the format "[ip-address]:port"
-                        if (host[0] == '[') {
-                            let host_port = host.slice(1).split(']:');
-                            host = host_port[0];
-                            port = host_port[1];
-                        }
+                    if (hostnames[i].match(terms[j]))
+                        searchResults.push(this._parse_ssh_string(hostnames[i]));
 
-                        searchResults.push({
-                            'user': user,
-                            'host': host,
-                            'port': port
-                        });
-                    }
                 }
                 catch(ex) {
                     continue;
@@ -310,9 +344,21 @@ const SshSearchProvider = new Lang.Class({
         let res = terms.map(function (term) { return new RegExp(term, 'i'); });
 
         results = results.concat(this._checkHostnames(this._configHosts, terms));
-        results = results.concat(this._checkHostnames(this._knownHosts, terms));
-        results = results.concat(this._checkHostnames(this._sshknownHosts1, terms));
-        results = results.concat(this._checkHostnames(this._sshknownHosts2, terms));
+
+        // Limit the search result to 20 items
+        results.splice(10);
+
+        for (i=0; i<terms.length; i++) {
+            let new_ssh_item = this._parse_ssh_string(terms[i]);
+
+            if (results.length == 1) {
+                if (this._ssh_array_to_str(results[0]) != this._ssh_array_to_str(new_ssh_item))
+                    results = results.concat(new_ssh_item);
+            } else {
+                results = results.concat(new_ssh_item);
+            }
+
+        }
 
         this.searchSystem.setResults(this, results);
     },
