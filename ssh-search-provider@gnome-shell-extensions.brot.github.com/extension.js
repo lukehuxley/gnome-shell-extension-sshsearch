@@ -26,6 +26,7 @@ const St = imports.gi.St;
 const Util = imports.misc.util;
 const IconGrid = imports.ui.iconGrid;
 
+
 // Settings
 const DEFAULT_TERMINAL_SCHEMA = 'org.gnome.desktop.default-applications.terminal';
 const DEFAULT_TERMINAL_KEY = 'exec';
@@ -81,7 +82,7 @@ const SshSearchProvider = new Lang.Class({
     Extends: Search.SearchProvider,
 
     activateResult: function(id) {
-
+        
         hostArray = id.host.split('.');
         profile = hostArray[hostArray.length - 1];
 
@@ -92,10 +93,11 @@ const SshSearchProvider = new Lang.Class({
     },
 
     _exec_ssh: function(user, host, port, profile) {
-
+        
         let terminal_definition = getDefaultTerminal();
         let terminal_args = terminal_definition.args.split(' ');
         let cmd = [terminal_definition.exec];
+        let target = '';
 
         // add defined gsettings arguments, but remove --execute and -x
         for (var i=0; i<terminal_args.length; i++) {
@@ -126,17 +128,22 @@ const SshSearchProvider = new Lang.Class({
 
     _add_ssh: function(user, host, port, profile) {
 
-        cmd = Array('/usr/local/bin/ssh-config');
-        cmd.push('add');
-        cmd.push(user + '@' + host + ':' + port);
+        log(user);
+        log(host);
+        log(port);
+        log(profile);
 
-        // start terminal with ssh command
+        let cmd = Array('/usr/local/bin/add-ssh-to-config');
+        cmd.push(user);
+        cmd.push(host);
+        cmd.push(port.toString());
+
         Util.spawn(cmd);
 
     },
 
     _parse_ssh_string: function(ssh_string) {
-
+        
         var atSplit = ssh_string.split('@');
         // If a user has been provided
         if (atSplit.length > 1) {
@@ -144,7 +151,7 @@ const SshSearchProvider = new Lang.Class({
             var host = atSplit[1];
         // If a user has not been provided
         } else {
-            var user = 'root';
+            var user = 'luke.huxley';
             var host = ssh_string;
         }
 
@@ -167,25 +174,27 @@ const SshSearchProvider = new Lang.Class({
             var profile = 'Default';
         }
 
-        return {
+        
+        return JSON.stringify({
             'user': user,
             'host': host,
             'port': port,
             'profile': profile
-        };
+        });
 
     },
 
     _ssh_array_to_str: function(ssh_array) {
-
+        
         return ssh_array.user + '@' + ssh_array.host + ':' + ssh_array.port;
 
     },
 
     launchSearch: function(terms) {
-        for (i=0; i < terms.length; i++) {
+        
+        for (let i=0; i < terms.length; i++) {
 
-            ssh_result = this._parse_ssh_string(terms[i]);
+            let ssh_result = JSON.parse(this._parse_ssh_string(terms[i]));
 
             this._add_ssh(ssh_result.user, ssh_result.host, ssh_result.port, ssh_result.profile);
             this._exec_ssh(ssh_result.user, ssh_result.host, ssh_result.port, ssh_result.profile);
@@ -193,11 +202,7 @@ const SshSearchProvider = new Lang.Class({
     },
 
     _init: function() {
-        // Since gnome-shell 3.6 the log output is in ~/.cache/gdm/session.log
-        // Since gnome-shell 3.8 the log output is in /var/log/messages
-        // Since gnome-shell 3.10 you get log output with "journalctl -f"
-        //log('init ssh-search');
-
+        
         let filename = '';
         let terminal_definition = getDefaultTerminal();
 
@@ -228,6 +233,7 @@ const SshSearchProvider = new Lang.Class({
     },
 
     _onConfigChanged: function(filemonitor, file, other_file, event_type) {
+        
         if (!file.query_exists (null)) {
             this._configHosts = [];
             return;
@@ -263,13 +269,13 @@ const SshSearchProvider = new Lang.Class({
                 // If line contains "user "
                 } else if (line.match('user ')) {
 
-                    index = line.indexOf('user ');
+                    let index = line.indexOf('user ');
                     host = line.slice('user '.length + index) + '@' + host;
 
                 // If line contains "port "
                 } else if (line.match('port ')) {
 
-                    index = line.indexOf('port ');
+                    let index = line.indexOf('port ');
                     host = host + ':' + line.slice('port '.length + index);
 
                 }
@@ -285,31 +291,31 @@ const SshSearchProvider = new Lang.Class({
         }
     },
 
-    createResultObject: function(result, terms) {
-        return null;
-    },
-
     getResultMetas: function(resultIds, callback) {
-        let metas = resultIds.map(this.getResultMeta, this);
+        
+        let metas = resultIds.map(this._getResultMeta, this);
         callback(metas);
     },
 
-    getResultMeta: function(resultId) {
-        let ssh_name = resultId.host;
+    _getResultMeta: function(resultId) {
+        
+        let resultObject = JSON.parse(resultId);
+
+        let ssh_name = resultObject.host;
         let terminal_definition = getDefaultTerminal();
 
-        if (resultId.port != 22) {
-            ssh_name = ssh_name + ':' + resultId.port;
+        if (resultObject.port != 22) {
+            ssh_name = ssh_name + ':' + resultObject.port;
         }
 
-        if (resultId.user.length != 0) {
-            ssh_name = resultId.user + '@' + ssh_name;
+        if (resultObject.user.length != 0) {
+            ssh_name = resultObject.user + '@' + ssh_name;
         }
 
-        return { 'id': resultId,
+        return { 'id': resultObject,
                  'name': ssh_name,
                  'createIcon': function(size) {
-                        let xicon = new Gio.ThemedIcon({name: terminal_definition.exec});
+                        let xicon = Gio.icon_new_for_string('/usr/share/icons/hicolor/scalable/apps/terminator.svg');
                         return new St.Icon({icon_size: size,
                                             gicon: xicon});
                  }
@@ -317,13 +323,15 @@ const SshSearchProvider = new Lang.Class({
     },
 
     _checkHostnames: function(hostnames, terms) {
+        
         let searchResults = [];
         for (var i=0; i<hostnames.length; i++) {
             for (var j=0; j<terms.length; j++) {
                 try {
 
-                    if (hostnames[i].match(terms[j]))
+                    if (hostnames[i].match(terms[j])) {
                         searchResults.push(this._parse_ssh_string(hostnames[i]));
+                    }
 
                 }
                 catch(ex) {
@@ -331,44 +339,66 @@ const SshSearchProvider = new Lang.Class({
                 }
             }
         }
+
         return searchResults;
     },
 
     filterResults: function(providerResults, maxResults) {
+        
         return providerResults;
     },
 
     _getResultSet: function(sessions, terms) {
-        // check if a found host-name begins like the search-term
+        
         let results = [];
         let res = terms.map(function (term) { return new RegExp(term, 'i'); });
 
         results = results.concat(this._checkHostnames(this._configHosts, terms));
 
+
+
         // Limit the search result to 20 items
         results.splice(10);
 
-        for (i=0; i<terms.length; i++) {
-            let new_ssh_item = this._parse_ssh_string(terms[i]);
 
-            if (results.length == 1) {
-                if (this._ssh_array_to_str(results[0]) != this._ssh_array_to_str(new_ssh_item))
-                    results = results.concat(new_ssh_item);
-            } else {
-                results = results.concat(new_ssh_item);
+        let response = false;
+
+        for(var i=0; i<terms.length; i++) {
+
+            // If search term is longer than 5 chars
+            if (terms[i].length > 5) {
+
+                let ssh_string = this._parse_ssh_string(terms[i]);
+
+                let new_ssh_item = JSON.parse(ssh_string);
+
+                response = GLib.spawn_command_line_sync('nslookup ' + new_ssh_item.host);
+
+                if (response[3] == 0) {
+                    results = results.concat(ssh_string);
+                }
+
             }
 
         }
 
-        this.searchSystem.setResults(this, results);
+        return results;
     },
 
-    getInitialResultSet: function(terms) {
-        return this._getResultSet(this._sessions, terms);
+    getInitialResultSet: function(terms, callback, cancelable) {
+        
+        callback(this._getResultSet(this._sessions, terms));
+
+        return [];
+
     },
 
-    getSubsearchResultSet: function(previousResults, terms) {
-        return this._getResultSet(this._sessions, terms);
+    getSubsearchResultSet: function(results, terms, callback, cancelable) {
+        
+        callback(this._getResultSet(this._sessions, terms));
+
+        return [];
+
     },
 });
 
@@ -378,17 +408,13 @@ function init() {
 function enable() {
     if (!sshSearchProvider) {
         sshSearchProvider = new SshSearchProvider();
-        Main.overview.addSearchProvider(sshSearchProvider);
+        Main.overview.viewSelector._searchResults._registerProvider(sshSearchProvider);
     }
 }
 
 function disable() {
-    if  (sshSearchProvider) {
-        Main.overview.removeSearchProvider(sshSearchProvider);
-        sshSearchProvider.configMonitor.cancel();
-        sshSearchProvider.knownhostsMonitor.cancel();
-        sshSearchProvider.sshknownhostsMonitor1.cancel();
-        sshSearchProvider.sshknownhostsMonitor2.cancel();
+    if (sshSearchProvider) {
+        Main.overview.viewSelector._searchResults._unregisterProvider(sshSearchProvider);
         sshSearchProvider = null;
     }
 }
